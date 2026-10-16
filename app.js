@@ -4,6 +4,7 @@
 const C=BTC, E=C.esc, F=C.format, main=document.getElementById('main');
 let state=C.empty(), storageBroken=false, storageMessage='', tab='market', error='', calc=null;
 let draft={side:'LONG',entry:'',stop:'',t1:'',t2:''}, importDraft='', busy=false, onlineOK=false, last5=0, fiveRows=null, installing=null, audio=null, toastTimer;
+let priceSocket=null,priceRetry=null,pendingPrice=null,lastStreamAt=0,lastPriceSave=0;
 try{const raw=localStorage.getItem(C.KEY);if(raw)state=C.validateBackup(JSON.parse(raw));}
 catch(e){storageBroken=true;storageMessage='Der lokale Speicher ist nicht lesbar. Vorhandene Daten werden nicht überschrieben. Bitte zuerst eine Sicherung prüfen.';}
 function save(){
@@ -29,13 +30,14 @@ function chart(m){
 function eventsHTML(){return state.events.slice(0,8).map(e=>'<article class="event"><div class="row"><strong>'+E(e.title)+'</strong><time>'+E(stamp(e.at))+'</time></div><p class="muted">'+E(e.text)+'</p></article>').join('')||'<p class="empty">Noch keine lokalen Alarme. Deine WhatsApp-Meldungen bleiben im Chat.</p>';}
 function marketHTML(){
  const m=state.market,fresh=onlineOK&&m&&Date.now()-m.at<45000,ws=C.watchStatus();
- return header('BTC / USDT PERPETUAL','Alles im Blick.','Kurs beobachten. Signale übernehmen. Trades festhalten.')+
+ return header('BTC / USDT PERPETUAL','Alles im Blick.','Live-Kurs im 0,5-Sekunden-Takt. Signale automatisch empfangen.')+
  '<section class="card hero"><div class="row"><span class="small muted">Bitcoin <strong class="tiny">BTC</strong></span><span class="badge '+(fresh?'live':'stale')+'"><i class="dot"></i>'+(fresh?'AKTUELL':m?'GESPEICHERTER STAND':'VERBINDE …')+'</span></div>'+
- '<div class="price">'+(m?F(m.price):'—')+' <small>USDT</small></div><div class="small muted">'+(m?'Letzter Abruf '+E(stamp(m.at)):'Direkter Kursabruf von Binance, ohne Anmeldung.')+'</div>'+chart(m)+
+ '<div class="price"><span data-live-price>'+(m?F(m.price):'—')+'</span> <small>USDT</small></div><div class="small muted" data-live-stamp>'+(m?'Letzter Abruf '+E(stamp(m.at)):'Direkter Kursabruf von Binance, ohne Anmeldung.')+'</div>'+chart(m)+
  '<div class="metrics"><div><span>5 Minuten</span><strong class="'+signed(m?.changes?.five||0)+'">'+trend(m?.changes?.five)+'</strong></div><div><span>15 Minuten</span><strong class="'+signed(m?.changes?.fifteen||0)+'">'+trend(m?.changes?.fifteen)+'</strong></div><div><span>RSI(7) · 5 Min.</span><strong>'+F(m?.rsi,0)+'</strong></div></div></section>'+
  '<div class="row"><span class="tiny muted">Binance-Futures · nicht der IQ-Option-Kurs</span><button class="btn subtle" data-act="refresh" '+(busy?'disabled':'')+'>'+(busy?'Lädt …':'↻ Aktualisieren')+'</button></div>'+
  (error?'<p class="error" role="alert">'+E(error)+'</p>':'')+
- '<div class="card"><div class="row"><div><p class="eyebrow">DEINE WACHE</p><h3>'+E(ws.label)+'</h3></div><span class="badge">DUBAI</span></div><p class="small muted">'+E(ws.text)+'</p><p class="note">Lokale Alarme funktionieren nur, solange diese App im Vordergrund offen ist. Bei gesperrtem Handy bleibt die separate WhatsApp-Wache dein Meldeweg.</p></div>'+
+ BTCChannel.panel(true,1)+
+ '<div class="card"><div class="row"><div><p class="eyebrow">DEINE WACHE</p><h3>'+E(ws.label)+'</h3></div><span class="badge">DUBAI</span></div><p class="small muted">'+E(ws.text)+'</p><p class="note">Automatische Wachen-Signale kommen nach dem Verbinden auch per Handy-Benachrichtigung. Eigene Kursmarken funktionieren nur, solange diese App im Vordergrund offen ist.</p></div>'+
  '<div class="section-title"><h2>Kursalarme</h2><a href="#more" class="small">Verwalten →</a></div><div class="card"><div class="row"><div><strong>'+state.alarms.filter(a=>a.active).length+' aktiv</strong><p class="small muted">Einmalige Alarme bei deinen Kursmarken.</p></div><a class="btn" href="#more">+ Alarm</a></div></div>'+
  '<div class="section-title"><h2>Letzte Meldungen</h2><span class="tiny muted">NUR AUF DIESEM HANDY</span></div><section class="card">'+eventsHTML()+'</section>';
 }
@@ -48,8 +50,8 @@ function resultHTML(s){
  '<p class="tiny muted">Der eingegebene Stop wird unverändert verwendet, nicht nochmals verdoppelt. Keine Orderausführung.</p></div>';
 }
 function signalsHTML(){
- return header('SIGNAL & QUANTITY','Dein nächster Schritt.','WhatsApp-Signal übernehmen oder eine Position berechnen.')+
- '<section class="card"><h2>WhatsApp-Signal übernehmen</h2><form id="signal-form"><div class="field"><label for="signal-text">Vollständigen Signaltext hier einfügen</label><textarea id="signal-text" name="text" rows="4" maxlength="12000" placeholder="JETZT LONG auf BTC-Perp …">'+E(importDraft)+'</textarea></div><button class="btn primary wide" type="submit">Signal übernehmen</button><p class="tiny muted">Manuelle Übernahme. Kein automatischer Signalabruf und keine neuen LONG-/SHORT-Empfehlungen durch diese App.</p></form></section>'+
+ return header('SIGNAL & QUANTITY','Dein nächster Schritt.','Automatische Meldungen deiner BTC-Wache und dein Quantity-Rechner.')+BTCChannel.panel(true)+
+ '<section class="card"><h2>Signal zusätzlich in den Rechner übernehmen</h2><form id="signal-form"><div class="field"><label for="signal-text">Vollständigen Signaltext hier einfügen</label><textarea id="signal-text" name="text" rows="4" maxlength="12000" placeholder="JETZT LONG auf BTC-Perp …">'+E(importDraft)+'</textarea></div><button class="btn primary wide" type="submit">Signal übernehmen</button><p class="tiny muted">Optional für deinen lokalen Quantity-Rechner. Automatische Meldungen stehen bereits oben; kein Hineinkopieren nötig.</p></form></section>'+
  '<section class="card"><h2>Quantity-Rechner</h2><form id="calc-form"><div class="field"><label for="side">Richtung</label><select name="side" id="side"><option value="LONG" '+(draft.side==='LONG'?'selected':'')+'>🔴 LONG</option><option value="SHORT" '+(draft.side==='SHORT'?'selected':'')+'>🟢 SHORT</option></select></div><div class="grid2">'+numeric('entry','Einstieg',draft.entry,'Kurs in $')+numeric('stop','Stop',draft.stop,'Endgültiger Stop')+numeric('t1','Ziel 1 · optional',draft.t1)+numeric('t2','Ziel 2 · optional',draft.t2)+'</div><button class="btn primary wide">Berechnen</button></form>'+
  (calc?resultHTML(calc)+'<button class="btn wide" data-act="save-calc">Berechnung merken</button>':'')+'<p class="tiny muted">Reiner Rechner, kein neues Handelssignal. Es gelten deine bisherigen 25 %, Spread 14,10 $, Hebel 1000, Schritt und Mindestgröße 0,01 BTC.</p></section>'+
  '<div class="section-title"><h2>Übernommene Signale</h2><span class="tiny muted">'+state.signals.length+' EINTRÄGE</span></div>'+
@@ -65,14 +67,14 @@ function journalHTML(){
  '<div class="section-title"><h2>Deine Einträge</h2></div><div class="card">'+(state.trades.map(t=>'<article class="journal-item"><div class="row"><div><strong>'+E(t.side)+'</strong><div class="tiny muted">'+E(t.date.split('-').reverse().join('.'))+'</div></div><strong class="'+signed(t.pnl)+'">'+(t.pnl>=0?'+':'')+F(t.pnl)+' $</strong></div>'+(t.note?'<p class="small muted">'+E(t.note)+'</p>':'')+'</article>').join('')||'<p class="empty">Dein Journal ist noch leer.</p>')+'</div>';
 }
 function moreHTML(){
- return header('NUR DEIN HANDY','So, wie du handelst.','Kontostand, Kursmarken und deine lokale Sicherung.')+
+ return header('NUR DEIN HANDY','So, wie du handelst.','Benachrichtigungen, Kontostand, Kursmarken und deine lokale Sicherung.')+BTCChannel.panel(false)+
  '<section class="card"><h2>Dein Kontostand</h2><form id="balance-form">'+numeric('balance','Kontostand in US-Dollar',state.balance==null?'':F(state.balance),'Bitte einmal eintragen')+'<button class="btn primary wide">Auf diesem Handy speichern</button></form><p class="note gold">Dieser Betrag bleibt lokal. Änderungen werden nicht an Lucy oder an die bestehende BTC-Wache übertragen. Für deren Quantity schickst du Lucy den Betrag wie bisher per WhatsApp.</p><ul class="settings-list"><li><span>Stop-Budget</span><strong>25 % vom Konto</strong></li><li><span>Spread</span><strong>14,10 $</strong></li><li><span>Hebel</span><strong>1000</strong></li><li><span>Schritt / Mindestgröße</span><strong>0,01 BTC</strong></li></ul></section>'+
  '<section class="card"><h2>Kursalarme</h2><form id="alarm-form"><div class="grid2"><div class="field"><label for="direction">Melden bei</label><select name="direction" id="direction"><option value="above">Kurs ab / über</option><option value="below">Kurs ab / unter</option></select></div>'+numeric('alarm-price','Kurs in USDT','','z. B. 85.000')+'</div><button class="btn wide">+ Kursalarm speichern</button></form><p class="tiny muted">Einmaliger Alarm, auch wenn die Marke beim nächsten Abruf bereits erreicht ist. Nur im Vordergrund, unabhängig von der Nachtruhe.</p>'+
  state.alarms.map(a=>'<div class="alarm row"><div><span class="tiny muted">'+(a.direction==='above'?'AB / ÜBER':'AB / UNTER')+'</span><br><strong>'+F(a.price)+' $</strong><div class="toggle-state">'+(a.active?'Wartet auf Kursmarke':a.firedAt?'Ausgelöst '+E(stamp(a.firedAt)):'Pausiert')+'</div></div><button class="btn subtle" data-act="toggle-alarm" data-id="'+E(a.id)+'">'+(a.active?'Pausieren':'Aktivieren')+'</button></div>').join('')+'</section>'+
- '<section class="card"><h2>Sprünge & Ton</h2><label class="check"><input id="jump-setting" type="checkbox" '+(state.settings.jumps?'checked':'')+'>Schnelle Kursbewegungen melden</label><p class="tiny muted">0,7 % in 5 Min. oder 1 % in 15 Min. · 05–21 Uhr Dubai, auch am Wochenende · 30 Min. Pause, höchstens 6 am Tag. Nur während die App offen ist.</p><label class="check"><input id="sound-setting" type="checkbox" '+(state.settings.sound?'checked':'')+'>Kurzer Ton bei lokalem Alarm</label><p class="tiny muted">Kein Hintergrund-Push. Lautlosmodus und Browser können den Ton unterdrücken.</p></section>'+
+ '<section class="card"><h2>Lokale Sprünge & Ton</h2><label class="check"><input id="jump-setting" type="checkbox" '+(state.settings.jumps?'checked':'')+'>Zusätzliche lokale Kursbewegungen melden</label><p class="tiny muted">0,7 % in 5 Min. oder 1 % in 15 Min. · 05–21 Uhr Dubai, auch am Wochenende · 30 Min. Pause, höchstens 6 am Tag. Nur während die App offen ist. Die automatischen Sprungmeldungen der Wache sind davon unabhängig.</p><label class="check"><input id="sound-setting" type="checkbox" '+(state.settings.sound?'checked':'')+'>Kurzer Ton bei lokalem Alarm</label><p class="tiny muted">Der Ton dieser lokalen Alarme ist unabhängig von Handy-Benachrichtigungen. Lautlosmodus und Browser können ihn unterdrücken.</p></section>'+
  '<section class="card"><h2>Sicherung</h2><p class="small muted">Bei Handywechsel, Browserdaten-Löschen oder Neuinstallation können lokale Einträge verloren gehen. Die Sicherungsdatei enthält auch deinen Kontostand.</p><div class="btns"><button class="btn" data-act="export">Sicherung speichern</button><label class="btn file-label">Sicherung laden<input id="import-backup" type="file" accept=".json,application/json" aria-label="Sicherung auswählen"></label></div></section>'+
  '<section class="card"><h2>Als Handy-App nutzen</h2><div class="textblock"><p>Über einen freigegebenen HTTPS-Link in <strong>Chrome auf Android</strong> öffnen: Menü ⋮ → „Zum Startbildschirm hinzufügen“ → „Installieren“.</p><p>Die HTML-Datei lässt sich zunächst direkt im Browser ausprobieren. Die Installation als App und der zuverlässigere Offline-Start brauchen den HTTPS-Link.</p><p>Die Oberfläche, dein Journal und der Rechner funktionieren nach dem ersten Laden auch offline. Aktuelle Kurse und Alarme benötigen Internet und eine geöffnete App.</p></div></section>'+
- '<details class="card"><summary>Was die App kann – und was nicht</summary><div class="textblock"><p>Alle Einträge werden im lokalen Browser-Speicher abgelegt. Kein Konto, kein Tracking, kein Broker-Login und keine Orderausführung. Bei Kursabrufen sieht Binance deine IP-Adresse. Über den Installationslink sieht auch der Seitenanbieter den Abruf.</p><p>Marktdaten: Binance BTCUSDT Perpetual. USDT ist nicht exakt USD, und die Kurse können von IQ Option abweichen. RSI aus geschlossenen 5-Minuten-Kerzen dient nur der Übersicht.</p><p>Signale werden nicht automatisch aus WhatsApp gelesen. Die App erzeugt keine eigenen LONG-/SHORT-Einstiege und ersetzt weder die bestehende Wache noch deren Kalender- und Trendfilter. Eine gespeicherte Berechnung ist kein Handelssignal.</p><p>Quantity entspricht der bisherigen Rechnung mit Spread und Margin-Begrenzung. Trailing-Stufe: ab +0,5 R auf Einstieg +0,25 R + Spread, nur wenn die Stufe vor Ziel 1 liegt. Ein nachträgliches Erreichen dieser Stufe wird hier nicht als automatischer Handlungsauftrag gemeldet.</p><p>Kontostand und Einträge sind lokal gespeichert, nicht verschlüsselt. Apps/Seiten derselben Web-Adresse und Personen mit Zugriff auf das entsperrte Handy können unter Umständen darauf zugreifen.</p></div></details><p class="version">BTC-Wache Mobil · erste Version · 16.10.2026</p>';
+ '<details class="card"><summary>Was die App kann – und was nicht</summary><div class="textblock"><p>Kontostand und Journal bleiben im lokalen Browser-Speicher. Kein Tracking, kein Broker-Login und keine Orderausführung. Für die automatische Wache wird ein eigener Gerätezugang gespeichert. Bei Kursabrufen sieht Binance deine IP-Adresse. Über den Installationslink sieht auch der Seitenanbieter den Abruf.</p><p>Marktdaten: Binance BTCUSDT Perpetual. USDT ist nicht exakt USD, und die Kurse können von IQ Option abweichen. Der Live-Kurs wird höchstens zweimal je Sekunde angezeigt; bei unterbrochenem Datenstrom wird kein Live-Takt behauptet. RSI aus geschlossenen 5-Minuten-Kerzen dient nur der Übersicht.</p><p>Automatische Signale stammen direkt aus der bestehenden Wache, nicht aus dem WhatsApp-Chat. Die App erzeugt keine zweite Strategie. Kalender-, Trend-, Nacht- und Wochenendfilter bleiben unverändert. Ein Signal wird nach drei Minuten nur noch als Verlauf angezeigt. Eine gespeicherte Berechnung ist kein Handelssignal.</p><p>Quantity und Journal bleiben lokal. Automatische Signaltexte können die Quantity der bestehenden Wache enthalten. Trailing-Stufe: ab +0,5 R auf Einstieg +0,25 R + Spread, nur wenn die Stufe vor Ziel 1 liegt.</p><p>Für Hintergrund-Benachrichtigungen wird der Push-Dienst deines Browsers verwendet. Signale und Gerätezugänge liegen geschützt auf dem bestehenden Server, nicht öffentlich bei GitHub. Kontostand und lokale Einträge sind nicht verschlüsselt. Personen mit Zugriff auf das entsperrte Handy können sie lesen.</p></div></details><p class="version">BTC-Wache Mobil · automatische Signale · 16.10.2026</p>';
 }
 function render(){
  document.querySelectorAll('[data-tab]').forEach(a=>{if(a.dataset.tab===tab)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
@@ -106,9 +108,10 @@ async function refresh(){
   const current=C.candleData(result[0],60000);
   if(need5){if(result[1]){try{fiveRows=C.candleData(result[1],300000).closed;last5=now;}catch(e){fiveRows=null;}}else fiveRows=null;}
   const changes=C.jumpChanges(current.closed);
-  state.market={price:current.last,at:Date.now(),rows:current.rows.map(k=>({t:k.t,c:k.c})),changes,rsi:fiveRows&&Date.now()-last5<360000?C.rsi(fiveRows.map(k=>k.c),7):null};
+  const live=Date.now()-lastStreamAt<5000&&state.market;
+  state.market={price:live?state.market.price:current.last,at:live?state.market.at:Date.now(),rows:current.rows.map(k=>({t:k.t,c:k.c})),changes,rsi:fiveRows&&Date.now()-last5<360000?C.rsi(fiveRows.map(k=>k.c),7):null};
   onlineOK=true;error='';
-  const fired=C.fireAlarms(state,current.last,Date.now(),true,changes);
+  const fired=C.fireAlarms(state,state.market.price,Date.now(),true,changes);
   save();
   if(fired.length){toast(fired.map(e=>e.title+': '+e.text).join(' · '));beep();}
  }catch(e){onlineOK=false;error=navigator.onLine===false?'Offline. Gespeicherter Kurs ist nicht aktuell; keine neuen lokalen Alarme.':'Kursabruf derzeit nicht möglich. Gespeicherter Stand bleibt sichtbar; keine neuen lokalen Alarme.';}
@@ -183,12 +186,37 @@ main.addEventListener('change',async e=>{
  }
 });
 window.addEventListener('hashchange',navigate);
-window.addEventListener('online',refresh);
-window.addEventListener('offline',()=>{onlineOK=false;error='Offline. Keine neuen lokalen Alarme.';if(tab==='market')render();});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){onlineOK=false;refresh();}});
+window.addEventListener('online',()=>{refresh();startPriceStream();});
+window.addEventListener('offline',()=>{stopPriceStream();onlineOK=false;error='Offline. Keine neuen lokalen Alarme.';if(tab==='market')render();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){onlineOK=false;refresh();startPriceStream();}else stopPriceStream();});
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installing=e;document.getElementById('install').hidden=false;});
 document.getElementById('install').addEventListener('click',async()=>{if(installing){await installing.prompt();await installing.userChoice;installing=null;document.getElementById('install').hidden=true;}});
 if(location.protocol!=='file:'&&'serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{toast('Offline-Start konnte noch nicht eingerichtet werden. Rechner und Journal bleiben nutzbar.');});
-navigate();refresh();
+navigate();refresh();startPriceStream();
 setInterval(()=>{if(!document.hidden)refresh();},15000);
+function stopPriceStream(){clearTimeout(priceRetry);priceRetry=null;pendingPrice=null;lastStreamAt=0;if(priceSocket){priceSocket.onclose=null;priceSocket.close();priceSocket=null;}}
+function startPriceStream(){
+ if(document.hidden||navigator.onLine===false||priceSocket)return;
+ clearTimeout(priceRetry);
+ const socket=new WebSocket('wss://fstream.binance.com/ws/btcusdt@aggTrade');priceSocket=socket;
+ socket.onmessage=e=>{try{const d=JSON.parse(e.data),price=Number(d.p),age=Date.now()-Number(d.E);if(d.e==='aggTrade'&&d.s==='BTCUSDT'&&price>0&&price<1e9&&age>=-10000&&age<10000)pendingPrice={price,at:Date.now()};}catch(_){}};
+ socket.onerror=()=>socket.close();socket.onclose=()=>{if(priceSocket===socket){priceSocket=null;lastStreamAt=0;priceRetry=setTimeout(startPriceStream,3000);}};
+}
+setInterval(()=>{
+ if(document.hidden)return;
+ const live=pendingPrice;pendingPrice=null;
+ if(live&&Date.now()-live.at<3000){
+  state.market=state.market||{rows:[],changes:{},rsi:null};state.market.price=live.price;state.market.at=live.at;lastStreamAt=live.at;onlineOK=true;error='';
+  const fired=C.fireAlarms(state,live.price,Date.now(),true,state.market.changes||{});
+  if(fired.length){save();toast(fired.map(e=>e.title+': '+e.text).join(' · '));beep();}
+  if(Date.now()-lastPriceSave>=15000){save();lastPriceSave=Date.now();}
+ }
+ if(tab!=='market')return;
+ const p=main.querySelector('[data-live-price]'),s=main.querySelector('[data-live-stamp]'),b=main.querySelector('.hero .badge');
+ if(p&&state.market)p.textContent=F(state.market.price);
+ const streaming=onlineOK&&Date.now()-lastStreamAt<5000;
+ if(s&&streaming)s.textContent='Live · 0,5-Sekunden-Takt · '+new Date(state.market.at).toLocaleTimeString('de-DE',{timeZone:'Asia/Dubai',hour12:false})+' Dubai';
+ else if(s&&state.market)s.textContent=(onlineOK&&Date.now()-state.market.at<45000?'Live-Verbindung unterbrochen · letzter Kurs ':'Gespeicherter Stand · ')+stamp(state.market.at);
+ if(b){const fresh=streaming||onlineOK&&state.market&&Date.now()-state.market.at<45000;b.className='badge '+(fresh?'live':'stale');b.innerHTML='<i class="dot"></i>'+(streaming?'LIVE · 0,5 S':fresh?'LETZTER ABRUF':'GESPEICHERTER STAND');}
+},500);
 })();

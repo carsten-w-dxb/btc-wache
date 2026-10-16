@@ -2,7 +2,7 @@
   "id": "./",
   "name": "BTC-Wache",
   "short_name": "BTC-Wache",
-  "description": "Lokaler BTC-Begleiter: Kurse, Kursalarme, Signal-Rechner und Trade-Journal.",
+  "description": "BTC-Livekurs im Halbsekundentakt, private Wachen-Signale, Handy-Benachrichtigungen, Rechner und Journal.",
   "lang": "de",
   "start_url": "./",
   "scope": "./",

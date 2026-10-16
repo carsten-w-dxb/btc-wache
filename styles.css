@@ -6,3 +6,5 @@ main{max-width:720px;margin:auto;padding:10px 20px 24px}h1{font-size:29px;line-h
 
 /* LUMASSI: Original-Logo ohne externe Bildabrufe. */
 .top{flex-wrap:wrap;row-gap:18px}.lumassi-brand{flex:0 0 100%;display:flex;align-items:center;justify-content:space-between;gap:18px}.lumassi-logo{display:block;width:180px;max-width:calc(100% - 72px);height:auto}@media(max-width:360px){.brand{font-size:13px;letter-spacing:1px}.brand small{font-size:7px;letter-spacing:1px}.coin{width:34px;height:34px}.top{column-gap:8px}.icon-btn{font-size:11px;padding-inline:8px}}
+:where(.btc-message){white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.55;font-size:14px}
+:where(.btc-channel h2){font-size:18px}
