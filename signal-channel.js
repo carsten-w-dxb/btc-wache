@@ -10,6 +10,60 @@ const pairing=new URLSearchParams(location.hash.slice(1)).get('pair');
 if(pairing)history.replaceState(null,'','#signals');
 function when(t){return new Date(t).toLocaleString('de-DE',{timeZone:'Asia/Dubai',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+' Dubai';}
 function recent(e){return connected&&checkedAt>Date.now()-45000&&health?.fresh&&!health?.muted&&!health?.stopped&&e.expiresAt>Date.now()+clockOffset;}
+const POPUP_KEY='btc-wache-popup-seen-v1';
+let shown=new Set(),popup=null,activePopup=null,popupQueue=[],popupView='';
+try{const saved=JSON.parse(localStorage.getItem(POPUP_KEY)||'[]');if(Array.isArray(saved))shown=new Set(saved.filter(id=>typeof id==='string').slice(-200));}catch(_){}
+function wasShown(id){
+ // Auch andere offene App-Fenster und ein erneuter Start sollen nicht doppelt melden.
+ try{const saved=JSON.parse(localStorage.getItem(POPUP_KEY)||'[]');if(Array.isArray(saved))for(const key of saved)if(typeof key==='string')shown.add(key);}catch(_){}
+ return shown.has(id);
+}
+function rememberPopup(id){
+ shown.add(id);shown=new Set([...shown].slice(-200));
+ try{localStorage.setItem(POPUP_KEY,JSON.stringify([...shown]));}catch(_){}
+}
+function popupCurrent(e){return e.preview||(!document.hidden&&navigator.onLine!==false&&credentials&&recent(e));}
+function renderPopup(){
+ if(!popup||!activePopup)return;
+ const e=activePopup,fresh=!!popupCurrent(e),test=e.preview||e.type==='test';
+ const view=e.id+':'+fresh+':'+popupQueue.length;if(view===popupView)return;popupView=view;
+ popup.className='btc-popup '+(fresh&&e.type==='entry'?(/SHORT/.test(e.title)?'short':'long'):'');
+ popup.innerHTML='<p class="eyebrow">'+(test?'NUR EIN TEST':fresh?'NEUE MELDUNG':'NICHT MEHR AKTUELL')+'</p>'+
+  '<h2 id="btc-popup-title">'+E(test?'TEST · Hinweisfenster':fresh?e.title:'BTC-Wache · Verlauf')+'</h2>'+
+  '<p class="tiny muted">'+E(when(e.createdAt))+'</p><div id="btc-popup-message">'+
+  (fresh?'<pre class="btc-message">'+E(e.text)+'</pre>':'<p class="note">Diese Meldung ist abgelaufen oder kann gerade nicht als aktuell bestätigt werden. Nicht als aktuellen Einstieg verwenden.</p><details><summary>Ursprüngliche Meldung ansehen</summary><pre class="btc-message">'+E(e.title+'\n'+e.text)+'</pre></details>')+'</div>'+
+  (popupQueue.length?'<p class="small muted">Weitere Meldungen: '+popupQueue.length+'</p>':'')+
+  '<div class="btns"><button class="btn primary" data-btc-popup-close autofocus>'+(test?'Schließen':'Gelesen')+'</button><button class="btn" data-btc-popup-signals>Zu den Signalen</button></div>';
+}
+function nextPopup(){
+ if(activePopup||document.hidden)return;
+ while(popupQueue.length){
+  const e=popupQueue.shift();if(!popupCurrent(e)||(!e.preview&&wasShown(e.id)))continue;
+  if(!popup){
+   popup=document.createElement('dialog');popup.setAttribute('aria-labelledby','btc-popup-title');popup.setAttribute('aria-describedby','btc-popup-message');document.body.appendChild(popup);
+   popup.addEventListener('close',()=>{activePopup=null;popupView='';setTimeout(nextPopup,0);});
+   popup.addEventListener('click',ev=>{
+    if(ev.target.closest('[data-btc-popup-signals]')){location.hash='signals';popup.close();}
+    else if(ev.target.closest('[data-btc-popup-close]'))popup.close();
+   });
+  }
+  activePopup=e;popupView='';renderPopup();popup.showModal();if(!e.preview)rememberPopup(e.id);break;
+ }
+}
+function checkPopups(){
+ if(document.hidden){renderPopup();return;}
+ popupQueue=popupQueue.filter(popupCurrent);
+ for(const e of events){
+  if(wasShown(e.id)||activePopup?.id===e.id||popupQueue.some(p=>p.id===e.id))continue;
+  // Unterdrückte/verspätete Meldungen bleiben Verlauf und werden nicht später
+  // durch eine wieder frische Verbindung nachträglich zu neuen Einstiegen.
+  if(popupCurrent(e))popupQueue.push(e);else rememberPopup(e.id);
+ }
+ popupQueue.sort((a,b)=>b.createdAt-a.createdAt);renderPopup();nextPopup();
+}
+function previewPopup(){
+ popupQueue.unshift({id:'local-popup-test',preview:true,type:'test',title:'TEST · Hinweisfenster',text:'So erscheint eine neue Meldung direkt in der geöffneten App – auch auf den Seiten Markt, Journal und Mehr.\n\nDies ist nur ein Anzeigetest, kein Long-/Short-Signal. Die Handy-Push-Meldungen bleiben zusätzlich aktiv.',createdAt:Date.now()});nextPopup();
+}
 function statusHTML(){
  const supported='Notification'in window&&'PushManager'in window&&'serviceWorker'in navigator;
  let label=credentials?(connected?'SIGNAL-EINGANG VERBUNDEN':'VERBINDUNG WIRD GEPRÜFT'):'EINMAL VERBINDEN';
@@ -22,6 +76,7 @@ function statusHTML(){
  (supported&&credentials?'<p class="tiny muted" data-btc-permission>Browserfreigabe: '+({granted:'erteilt',denied:'von Chrome blockiert',default:'noch offen'}[Notification.permission]||'unbekannt')+'</p>':'')+
  (problem?'<p class="error" role="status">'+E(problem)+'</p>':'')+
  (pushNotice?'<p class="'+(pushFailed?'error':'note')+'" role="status" data-btc-push-notice>'+E(pushNotice)+'</p>':'')+
+ '<p class="small muted">Neue Meldungen springen zusätzlich als Hinweisfenster auf, solange die App geöffnet ist – auf jeder Seite.</p><button class="btn" data-btc-act="popup-test">Hinweisfenster testen</button>'+
  '<p class="tiny muted">Automatische Signale benötigen die laufende Wache und Internet. Die Zustellung kann sich durch Netz oder Handy-Einstellungen verzögern. Eigene Kursmarken bleiben Vordergrund-Alarme. WhatsApp läuft zusätzlich weiter.</p></section>';
 }
 function eventsHTML(limit=100){
@@ -31,7 +86,7 @@ function eventsHTML(limit=100){
   (fresh||test?'<pre class="btc-message">'+E(e.text)+'</pre>':'<p class="small muted">'+E(e.title)+' · nicht als aktueller Einstieg verwenden.</p><details><summary>Ursprüngliche Meldung ansehen</summary><pre class="btc-message">'+E(e.text)+'</pre></details>')+'</article>';
  }).join('')||'<div class="card"><p class="empty">'+(credentials?'Noch keine automatische Meldung empfangen. Es wird nur gemeldet, wenn die bestehende Wache einen Auslöser erkennt.':'Nach dem Verbinden erscheinen die Meldungen deiner BTC-Wache hier automatisch.')+'</p></div>');
 }
-function update(){if(busy)return;document.querySelectorAll('[data-btc-status]').forEach(el=>el.innerHTML=statusHTML());document.querySelectorAll('[data-btc-events]').forEach(el=>el.innerHTML=eventsHTML(Number(el.dataset.btcEvents)||100));}
+function update(){renderPopup();if(busy)return;document.querySelectorAll('[data-btc-status]').forEach(el=>el.innerHTML=statusHTML());document.querySelectorAll('[data-btc-events]').forEach(el=>el.innerHTML=eventsHTML(Number(el.dataset.btcEvents)||100));}
 function panel(showEvents=false,limit=100){return '<div data-btc-status>'+statusHTML()+'</div>'+(showEvents?'<div data-btc-events="'+limit+'">'+eventsHTML(limit)+'</div>':'');}
 async function timedFetch(url,options={}){const c=new AbortController(),t=setTimeout(()=>c.abort(),12000);try{return await fetch(url,{...options,signal:c.signal,cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer'});}finally{clearTimeout(t);}}
 async function config(){
@@ -53,7 +108,7 @@ async function sync(){
   pushReady=!!(d.push&&'Notification'in window&&Notification.permission==='granted'&&await subscription());problem='';
   if(d.pushError==='subscription-expired'){pushFailed=true;pushNotice='Die Handy-Verbindung ist abgelaufen. Bitte Benachrichtigungen erneut aktivieren.';}
  }catch(e){connected=false;problem=navigator.onLine===false?'Offline. Meldungen sind gespeicherter Verlauf, keine neuen Einstiege.':e.name==='AbortError'?'Signalabruf derzeit nicht erreichbar. WhatsApp bleibt zusätzlich aktiv.':e.message;}
- finally{checking=false;update();}
+ finally{checking=false;update();checkPopups();}
 }
 function permissionMessage(){
  return Notification.permission==='denied'?'Chrome meldet die Benachrichtigungen für diese Website als blockiert. Die Freigabe muss in Chrome für carsten-w-dxb.github.io erlaubt werden. Deine Signal-Verbindung funktioniert trotzdem.':'Die Chrome-Freigabe ist noch offen; es wurde nichts erlaubt. Falls oben an der Adressleiste eine eingeklappte Abfrage erscheint, öffne sie und wähle „Allow“ (Zulassen).';
@@ -78,6 +133,7 @@ document.addEventListener('click',async e=>{
  const b=e.target.closest('[data-btc-act]');if(!b)return;
  const act=b.dataset.btcAct;
  try{
+  if(act==='popup-test'){previewPopup();return;}
   if(act==='connect'){await config();location.href=api+'connect';return;}
   if(act==='enable'){await enable(b);return;}
   if(act==='sync'){await sync();return;}
@@ -94,6 +150,7 @@ async function init(){
  catch(e){problem=e.message;}finally{update();}
 }
 if('serviceWorker'in navigator)navigator.serviceWorker.addEventListener('message',async e=>{if(e.data?.type==='btc-signal'){try{events=await STORE.list();}catch(_){}update();sync();}});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync();});window.addEventListener('online',sync);window.addEventListener('offline',()=>{connected=false;problem='Offline. Kein aktuelles Einstiegssignal verfügbar.';update();});
+document.addEventListener('visibilitychange',()=>{renderPopup();if(!document.hidden){sync();nextPopup();}});window.addEventListener('online',sync);window.addEventListener('offline',()=>{connected=false;problem='Offline. Kein aktuelles Einstiegssignal verfügbar.';update();});
+setInterval(()=>{if(!document.hidden){renderPopup();nextPopup();}},1000);
 window.BTCChannel={panel};init();setInterval(()=>{sync();update();},15000);
 })();
