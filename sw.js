@@ -1,6 +1,6 @@
 'use strict';
 importScripts('./signal-store.js');
-const PREFIX='btc-wache-mobil-', CACHE=PREFIX+'v4-signale-live';
+const PREFIX='btc-wache-mobil-', CACHE=PREFIX+'v5-push-freigabe';
 const FILES=['./','./index.html','./styles.css','./core.js','./app.js','./signal-store.js','./signal-channel.js','./manifest.webmanifest','./icon-192.png','./icon-512.png','./icon-maskable-512.png','./lumassi-logo.png'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith(PREFIX)&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));

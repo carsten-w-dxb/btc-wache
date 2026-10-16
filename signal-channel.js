@@ -2,6 +2,9 @@
 'use strict';
 const KEY='btc-wache-connection-v1',E=BTC.esc,STORE=BTCSignalStore;
 let credentials=null,api='',events=[],health=null,checkedAt=0,connected=false,pushReady=false,publicKey='',problem='',busy=false,checking=false,clockOffset=0;
+let pushNotice='',pushFailed=false,workerRegistration=null;
+// Den Worker vor dem Fingertipp bereitstellen, nicht erst vor der Browserabfrage.
+if('serviceWorker'in navigator)navigator.serviceWorker.ready.then(r=>{workerRegistration=r;}).catch(()=>{});
 try{credentials=JSON.parse(localStorage.getItem(KEY)||'null');}catch(_){}
 const pairing=new URLSearchParams(location.hash.slice(1)).get('pair');
 if(pairing)history.replaceState(null,'','#signals');
@@ -16,7 +19,9 @@ function statusHTML(){
  '<div class="btns">'+(supported?'<button class="btn primary" data-btc-act="enable" '+(busy?'disabled':'')+'>'+ (pushReady?'Push erneut verbinden':'Benachrichtigungen aktivieren')+'</button>':'')+(pushReady?'<button class="btn" data-btc-act="test">Testnachricht</button><button class="btn subtle" data-btc-act="disable">Push pausieren</button>':'')+'<button class="btn subtle" data-btc-act="sync">Signale aktualisieren</button><button class="btn subtle" data-btc-act="disconnect">Handy trennen</button></div>':
  '<button class="btn primary wide" data-btc-act="connect" '+(!api?'disabled':'')+'>Mit meiner BTC-Wache verbinden</button><p class="tiny muted">Einmal mit deinem bestehenden Carsten-Zugang anmelden. Keine neue Registrierung.</p>')+
  (!supported?'<p class="note">Für Handy-Benachrichtigungen bitte in Chrome auf Android öffnen. Auf dem iPhone die App zuerst zum Home-Bildschirm hinzufügen und dort öffnen.</p>':'')+
+ (supported&&credentials?'<p class="tiny muted" data-btc-permission>Browserfreigabe: '+({granted:'erteilt',denied:'von Chrome blockiert',default:'noch offen'}[Notification.permission]||'unbekannt')+'</p>':'')+
  (problem?'<p class="error" role="status">'+E(problem)+'</p>':'')+
+ (pushNotice?'<p class="'+(pushFailed?'error':'note')+'" role="status" data-btc-push-notice>'+E(pushNotice)+'</p>':'')+
  '<p class="tiny muted">Automatische Signale benötigen die laufende Wache und Internet. Die Zustellung kann sich durch Netz oder Handy-Einstellungen verzögern. Eigene Kursmarken bleiben Vordergrund-Alarme. WhatsApp läuft zusätzlich weiter.</p></section>';
 }
 function eventsHTML(limit=100){
@@ -26,7 +31,7 @@ function eventsHTML(limit=100){
   (fresh||test?'<pre class="btc-message">'+E(e.text)+'</pre>':'<p class="small muted">'+E(e.title)+' · nicht als aktueller Einstieg verwenden.</p><details><summary>Ursprüngliche Meldung ansehen</summary><pre class="btc-message">'+E(e.text)+'</pre></details>')+'</article>';
  }).join('')||'<div class="card"><p class="empty">'+(credentials?'Noch keine automatische Meldung empfangen. Es wird nur gemeldet, wenn die bestehende Wache einen Auslöser erkennt.':'Nach dem Verbinden erscheinen die Meldungen deiner BTC-Wache hier automatisch.')+'</p></div>');
 }
-function update(){document.querySelectorAll('[data-btc-status]').forEach(el=>el.innerHTML=statusHTML());document.querySelectorAll('[data-btc-events]').forEach(el=>el.innerHTML=eventsHTML(Number(el.dataset.btcEvents)||100));}
+function update(){if(busy)return;document.querySelectorAll('[data-btc-status]').forEach(el=>el.innerHTML=statusHTML());document.querySelectorAll('[data-btc-events]').forEach(el=>el.innerHTML=eventsHTML(Number(el.dataset.btcEvents)||100));}
 function panel(showEvents=false,limit=100){return '<div data-btc-status>'+statusHTML()+'</div>'+(showEvents?'<div data-btc-events="'+limit+'">'+eventsHTML(limit)+'</div>':'');}
 async function timedFetch(url,options={}){const c=new AbortController(),t=setTimeout(()=>c.abort(),12000);try{return await fetch(url,{...options,signal:c.signal,cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer'});}finally{clearTimeout(t);}}
 async function config(){
@@ -40,38 +45,47 @@ async function call(route,data){
  const d=await r.json();if(!r.ok){if(r.status===401){connected=false;pushReady=false;}throw Error(d.error||'Signalabruf nicht möglich.');}return d;
 }
 function timeout(p,ms){return Promise.race([p,new Promise((_,reject)=>setTimeout(()=>reject(Error('Die Handy-Benachrichtigung antwortet noch nicht. Bitte in Chrome erneut versuchen.')),ms))]);}
-async function subscription(){if(!('serviceWorker'in navigator)||!('PushManager'in window))return null;const r=await timeout(navigator.serviceWorker.ready,12000);return r.pushManager.getSubscription();}
+async function subscription(){if(!('serviceWorker'in navigator)||!('PushManager'in window))return null;const r=await timeout(navigator.serviceWorker.ready,12000);workerRegistration=r;return r.pushManager.getSubscription();}
 async function sync(){
  if(checking||document.hidden||!credentials)return;checking=true;
  try{
   await config();const d=await call('feed');clockOffset=d.serverTime-Date.now();await STORE.merge(d.events);events=await STORE.list();health=d.health;connected=true;checkedAt=Date.now();publicKey=d.publicKey;
-  pushReady=!!(d.push&&'Notification'in window&&Notification.permission==='granted'&&await subscription());problem=d.pushError==='subscription-expired'?'Die Handy-Verbindung ist abgelaufen. Bitte Benachrichtigungen erneut aktivieren.':'';
+  pushReady=!!(d.push&&'Notification'in window&&Notification.permission==='granted'&&await subscription());problem='';
+  if(d.pushError==='subscription-expired'){pushFailed=true;pushNotice='Die Handy-Verbindung ist abgelaufen. Bitte Benachrichtigungen erneut aktivieren.';}
  }catch(e){connected=false;problem=navigator.onLine===false?'Offline. Meldungen sind gespeicherter Verlauf, keine neuen Einstiege.':e.name==='AbortError'?'Signalabruf derzeit nicht erreichbar. WhatsApp bleibt zusätzlich aktiv.':e.message;}
  finally{checking=false;update();}
 }
-async function enable(){
- if(busy)return;busy=true;problem='';
+function permissionMessage(){
+ return Notification.permission==='denied'?'Chrome meldet die Benachrichtigungen für diese Website als blockiert. Die Freigabe muss in Chrome für carsten-w-dxb.github.io erlaubt werden. Deine Signal-Verbindung funktioniert trotzdem.':'Die Chrome-Freigabe ist noch offen; es wurde nichts erlaubt. Falls oben an der Adressleiste eine eingeklappte Abfrage erscheint, öffne sie und wähle „Allow“ (Zulassen).';
+}
+async function enable(button){
+ if(busy)return;busy=true;pushNotice='';pushFailed=false;
+ if(button){button.disabled=true;button.textContent='Chrome-Freigabe wird geprüft …';}
  try{
-  // Die Browserfreigabe muss unmittelbar aus dem Fingertipp kommen.
-  const permission=await Notification.requestPermission();if(permission!=='granted')throw Error('Bitte in den Handy-Einstellungen Benachrichtigungen für diese App erlauben.');
-  update();if(!publicKey){await sync();if(!publicKey)throw Error('Bitte die Signal-Verbindung zuerst aktualisieren.');}
-  const r=await timeout(navigator.serviceWorker.ready,12000);let sub=await r.pushManager.getSubscription();
-  if(!sub){const key=Uint8Array.from(atob(publicKey.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));sub=await timeout(r.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key}),20000);}
-  await call('subscribe',sub.toJSON());pushReady=true;problem='Benachrichtigungen aktiviert. Mit „Testnachricht“ kannst du die Zustellung auf diesem Handy prüfen.';
- }catch(e){pushReady=false;problem=e.message;}finally{busy=false;update();}
+  if(Notification.permission==='denied')throw Error(permissionMessage());
+  if(!publicKey){await sync();throw Error('Die Signal-Verbindung wurde aktualisiert. Bitte „Benachrichtigungen aktivieren“ noch einmal antippen.');}
+  if(!workerRegistration){await timeout(navigator.serviceWorker.ready,12000);throw Error('Die App ist jetzt bereit. Bitte „Benachrichtigungen aktivieren“ noch einmal antippen.');}
+  const key=Uint8Array.from(atob(publicKey.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+  // PushManager öffnet die native Browserfreigabe direkt im Fingertipp.
+  // Keine Netz-/Worker-Wartezeit und kein Austausch des Buttons während der Abfrage.
+  let sub;
+  try{sub=await workerRegistration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});}
+  catch(e){if(Notification.permission!=='granted'&&(e.name==='NotAllowedError'||Notification.permission==='denied'))throw Error(permissionMessage());throw e;}
+  await call('subscribe',sub.toJSON());pushReady=true;pushNotice='Benachrichtigungen aktiviert. Mit „Testnachricht“ kannst du die Zustellung auf diesem Handy prüfen.';
+ }catch(e){pushReady=false;pushFailed=true;pushNotice=e.message;}finally{busy=false;update();}
 }
 document.addEventListener('click',async e=>{
  const b=e.target.closest('[data-btc-act]');if(!b)return;
  const act=b.dataset.btcAct;
  try{
   if(act==='connect'){await config();location.href=api+'connect';return;}
-  if(act==='enable'){enable();return;}
+  if(act==='enable'){await enable(b);return;}
   if(act==='sync'){await sync();return;}
-  if(act==='test'){b.disabled=true;await call('test',{});problem='Test vom Push-Dienst angenommen. Bitte prüfen, ob die Testnachricht auf deinem Handy erscheint.';}
-  if(act==='disable'){const s=await subscription();if(s)await s.unsubscribe();pushReady=false;await call('unsubscribe',{});problem='Handy-Benachrichtigungen pausiert. Der Signal-Verlauf bleibt erreichbar.';}
+  if(act==='test'){b.disabled=true;await call('test',{});pushFailed=false;pushNotice='Test vom Push-Dienst angenommen. Bitte prüfen, ob die Testnachricht auf deinem Handy erscheint.';}
+  if(act==='disable'){const s=await subscription();if(s)await s.unsubscribe();pushReady=false;await call('unsubscribe',{});pushFailed=false;pushNotice='Handy-Benachrichtigungen pausiert. Der Signal-Verlauf bleibt erreichbar.';}
   if(act==='disconnect'){
    if(!confirm('Dieses Handy von der BTC-Wache trennen? WhatsApp und dein lokales Journal bleiben unverändert.'))return;
-   const s=await subscription();if(s)await s.unsubscribe();await call('disconnect',{});localStorage.removeItem(KEY);credentials=null;connected=false;pushReady=false;problem='Dieses Handy ist getrennt.';
+   const s=await subscription();if(s)await s.unsubscribe();await call('disconnect',{});localStorage.removeItem(KEY);credentials=null;connected=false;pushReady=false;problem='Dieses Handy ist getrennt.';pushNotice='';
   }
  }catch(err){problem=err.message;}finally{update();}
 });
