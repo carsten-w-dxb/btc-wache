@@ -4,7 +4,7 @@
 const C=BTC, E=C.esc, F=C.format, main=document.getElementById('main');
 let state=C.empty(), storageBroken=false, storageMessage='', tab='market', error='', calc=null;
 let draft={side:'LONG',entry:'',stop:'',t1:'',t2:''}, importDraft='', busy=false, onlineOK=false, last5=0, fiveRows=null, installing=null, audio=null, toastTimer;
-let priceSocket=null,priceRetry=null,pendingPrice=null,lastStreamAt=0,lastPriceSave=0;
+let priceSocket=null,priceRetry=null,pendingPrice=null,lastStreamAt=0,lastPriceSave=0,priceOpenedAt=0;
 try{const raw=localStorage.getItem(C.KEY);if(raw)state=C.validateBackup(JSON.parse(raw));}
 catch(e){storageBroken=true;storageMessage='Der lokale Speicher ist nicht lesbar. Vorhandene Daten werden nicht überschrieben. Bitte zuerst eine Sicherung prüfen.';}
 function save(){
@@ -198,12 +198,13 @@ function stopPriceStream(){clearTimeout(priceRetry);priceRetry=null;pendingPrice
 function startPriceStream(){
  if(document.hidden||navigator.onLine===false||priceSocket)return;
  clearTimeout(priceRetry);
- const socket=new WebSocket('wss://fstream.binance.com/ws/btcusdt@aggTrade');priceSocket=socket;
+ const socket=new WebSocket('wss://fstream.binance.com/market/ws/btcusdt@aggTrade');priceSocket=socket;priceOpenedAt=Date.now();
  socket.onmessage=e=>{try{const d=JSON.parse(e.data),price=Number(d.p),age=Date.now()-Number(d.E);if(d.e==='aggTrade'&&d.s==='BTCUSDT'&&price>0&&price<1e9&&age>=-10000&&age<10000)pendingPrice={price,at:Date.now()};}catch(_){}};
  socket.onerror=()=>socket.close();socket.onclose=()=>{if(priceSocket===socket){priceSocket=null;lastStreamAt=0;priceRetry=setTimeout(startPriceStream,3000);}};
 }
 setInterval(()=>{
  if(document.hidden)return;
+ if(priceSocket&&Date.now()-Math.max(lastStreamAt,priceOpenedAt)>12000)priceSocket.close();
  const live=pendingPrice;pendingPrice=null;
  if(live&&Date.now()-live.at<3000){
   state.market=state.market||{rows:[],changes:{},rsi:null};state.market.price=live.price;state.market.at=live.at;lastStreamAt=live.at;onlineOK=true;error='';
